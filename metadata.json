@@ -1,0 +1,6 @@
+{
+  "name": "Echo Real-Time",
+  "description": "A cross-platform real-time communication app for text, voice, and video messaging.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": []
+}

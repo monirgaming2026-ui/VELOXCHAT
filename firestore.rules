@@ -1,0 +1,146 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // User Profiles
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId) 
+        && incoming().uid == request.auth.uid
+        && incoming().username is string && incoming().username.size() <= 30
+        && incoming().fullName is string && incoming().fullName.size() <= 100
+        && incoming().photoURL is string && incoming().photoURL.size() <= 1048576
+        && incoming().createdAt == request.time;
+      
+      allow update: if isOwner(userId)
+        && (
+          // Action: Update Profile Info
+          (incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'photoURL', 'isOnline', 'lastSeen'])) ||
+          // Action: Status Update (Online/Offline)
+          (incoming().diff(existing()).affectedKeys().hasOnly(['isOnline', 'lastSeen']))
+        )
+        && (incoming().photoURL is string ? incoming().photoURL.size() <= 1048576 : true)
+        && incoming().uid == existing().uid
+        && incoming().lastSeen == request.time;
+
+      // User Friends
+      match /friends/{friendId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && incoming().uid == friendId
+          && incoming().status in ['pending', 'accepted']
+          && incoming().createdAt == request.time;
+        allow update: if isOwner(userId)
+          && (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          && incoming().updatedAt == request.time;
+        allow delete: if isOwner(userId);
+      }
+
+      // User Calls
+      match /calls/{callId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && incoming().participants.size() == 2
+          && request.auth.uid in incoming().participants
+          && incoming().createdAt == request.time;
+      }
+    }
+
+    // Username Uniqueness
+    match /usernames/{username} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && incoming().uid == request.auth.uid
+        && username.size() >= 3 && username.size() <= 30;
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
+    }
+
+    // World Chat
+    match /world_messages/{messageId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && incoming().senderId == request.auth.uid
+        && incoming().text is string && incoming().text.size() <= 1000
+        && incoming().createdAt == request.time;
+    }
+
+    // Chats
+    match /chats/{chatId} {
+      function isParticipant() {
+        return isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+      }
+      
+      // For create and list, we check local data
+      function isMemberOfChatData(data) {
+        return isSignedIn() && request.auth.uid in data.participants;
+      }
+
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participants;
+      allow get: if isSignedIn() && request.auth.uid in resource.data.participants;
+
+      allow create: if isSignedIn() 
+        && isMemberOfChatData(incoming())
+        && incoming().participants.size() == 2
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() 
+        && request.auth.uid in existing().participants
+        && (
+          // Action: Update Last Message
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'updatedAt'])
+        )
+        && incoming().updatedAt == request.time;
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isSignedIn() 
+          && exists(/databases/$(database)/documents/chats/$(chatId))
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+        
+        allow create: if isSignedIn()
+          && exists(/databases/$(database)/documents/chats/$(chatId))
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          && incoming().senderId == request.auth.uid
+          && incoming().chatId == chatId
+          && incoming().text is string && incoming().text.size() <= 5000
+          && incoming().status == 'sent'
+          && incoming().createdAt == request.time;
+
+        allow update: if isSignedIn()
+          && exists(/databases/$(database)/documents/chats/$(chatId))
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          && (
+            // Action: Update Status (Read Receipt)
+            incoming().diff(existing()).affectedKeys().hasOnly(['status']) &&
+            incoming().status in ['delivered', 'read']
+          )
+          && incoming().senderId == existing().senderId; // Text/Sender cannot change
+      }
+    }
+  }
+}
